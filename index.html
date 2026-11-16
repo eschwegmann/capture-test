@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capture Test</title>
+<style>
+  body { margin:0; font-family:system-ui,sans-serif; background:#111; color:#eee; }
+  #stage { text-align:center; background:#000; }
+  #wrap { position:relative; display:inline-block; line-height:0; }
+  video { max-width:100%; max-height:60vh; display:block; }
+  #guide { position:absolute; left:8%; top:25%; width:84%; height:50%;
+           border:3px solid #fff; border-radius:10px; box-sizing:border-box; }
+  #guide.hit { border-color:#3ddc84; }
+  #bar { display:flex; gap:8px; padding:10px; }
+  button { flex:1; font-size:17px; padding:14px 6px; border:0; border-radius:8px;
+           background:#2d6cdf; color:#fff; }
+  button.alt { background:#444; }
+  #info, #result { padding:0 12px; font-size:15px; line-height:1.6; }
+  #result b { color:#3ddc84; }
+  .raw { font-family:monospace; word-break:break-all; color:#bbb; }
+  #photo { width:100%; margin-top:10px; display:none; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="wrap">
+  <video id="video" playsinline muted></video><div id="guide"></div>
+</div></div>
+<div id="bar">
+  <button id="btnStart">Start camera</button>
+  <button id="btnShot" class="alt">Photo only</button>
+  <button id="btnLight" class="alt">Light</button>
+</div>
+<div id="info">Tap Start camera, then hold a label inside the box.</div>
+<div id="result"></div>
+<img id="photo" alt="Captured label">
+
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+// The white box on screen. Only barcodes inside it are accepted.
+const GUIDE = { x: 0.08, y: 0.25, w: 0.84, h: 0.50 };
+const GS = '\u001d';   // separator character inside GS1 barcodes
+
+const $ = id => document.getElementById(id);
+const video = $('video');
+const crop = document.createElement('canvas');
+let track = null, nativeScanner = null, zxingReader = null;
+let scanning = false, lightOn = false, startedAt = 0;
+
+// ---------- camera ----------
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+    track = stream.getVideoTracks()[0];
+  } catch (e) {
+    $('info').textContent = 'Camera error: ' + e.message;
+    return;
+  }
+  await setUpScanner();
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  $('info').textContent = 'Camera ' + video.videoWidth + ' x ' + video.videoHeight +
+    ' | scanner: ' + (nativeScanner ? 'built-in' : zxingReader ? 'ZXing' : 'none') +
+    ' | light: ' + (caps.torch ? 'yes' : 'no');
+  $('btnStart').textContent = 'Scan again';
+  resume();
+}
+
+async function setUpScanner() {
+  const wanted = ['code_128', 'itf', 'ean_13', 'upc_a', 'data_matrix', 'qr_code'];
+  if ('BarcodeDetector' in window) {
+    try {
+      const supported = await BarcodeDetector.getSupportedFormats();
+      const formats = wanted.filter(f => supported.indexOf(f) !== -1);
+      if (formats.length) nativeScanner = new BarcodeDetector({ formats: formats });
+    } catch (e) { nativeScanner = null; }
+  }
+  if (!nativeScanner && window.ZXing) {
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.DATA_MATRIX, ZXing.BarcodeFormat.QR_CODE]);
+    hints.set(ZXing.DecodeHintType.ASSUME_GS1, true);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    zxingReader = new ZXing.MultiFormatReader();
+    zxingReader.setHints(hints);
+  }
+}
+
+function resume() {
+  if (!track) return;
+  scanning = true;
+  startedAt = Date.now();
+  $('guide').classList.remove('hit');
+  $('result').innerHTML = '';
+  $('photo').style.display = 'none';
+  tick();
+}
+
+// ---------- scan loop ----------
+async function tick() {
+  if (!scanning) return;
+  let text = null;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (vw) {
+    const sx = Math.round(vw * GUIDE.x), sy = Math.round(vh * GUIDE.y);
+    const sw = Math.round(vw * GUIDE.w), sh = Math.round(vh * GUIDE.h);
+    crop.width = sw; crop.height = sh;
+    crop.getContext('2d', { willReadFrequently: true }).drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+    try {
+      if (nativeScanner) {
+        const found = await nativeScanner.detect(crop);
+        if (found.length) text = found[0].rawValue;
+      } else if (zxingReader) {
+        const source = new ZXing.HTMLCanvasElementLuminanceSource(crop);
+        const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+        text = zxingReader.decode(bitmap).getText();
+      }
+    } catch (e) { /* nothing found in this frame */ }
+  }
+  if (text && scanning) onDecode(text);
+  else setTimeout(tick, 120);
+}
+
+function onDecode(text) {
+  scanning = false;
+  const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+  $('guide').classList.add('hit');
+  if (navigator.vibrate) navigator.vibrate(80);
+  takePhoto();
+  showResult(text, seconds);
+}
+
+function takePhoto() {
+  if (!video.videoWidth) return;
+  const full = document.createElement('canvas');
+  full.width = video.videoWidth; full.height = video.videoHeight;
+  full.getContext('2d').drawImage(video, 0, 0);
+  $('photo').src = full.toDataURL('image/jpeg', 0.9);
+  $('photo').style.display = 'block';
+}
+
+// ---------- GS1 parsing ----------
+const FIXED = { '00': 18, '01': 14, '02': 14, '11': 6, '12': 6, '13': 6, '15': 6, '16': 6, '17': 6, '20': 2 };
+const NAMES = { '00': 'SSCC', '01': 'GTIN', '02': 'Content GTIN', '10': 'Lot', '11': 'Production date',
+  '13': 'Pack date', '15': 'Best before', '16': 'Sell by', '17': 'Expiration', '21': 'Serial',
+  '30': 'Count', '37': 'Count' };
+
+function parseGs1(raw) {
+  const hadPrefix = /^\](C1|d2|Q3|e0)/.test(raw);
+  const s = raw.replace(/^\](C1|d2|Q3|e0)/, '');
+  if (!hadPrefix && !/^(00|01|02)\d{14}/.test(s)) return null;
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === GS) { i++; continue; }
+    const two = s.substr(i, 2), three = s.substr(i, 3);
+    let ai, len;
+    if (two in FIXED) { ai = two; len = FIXED[two]; }
+    else if (/^3[1-6]$/.test(two)) { ai = s.substr(i, 4); len = 6; }          // weights and measures
+    else if (/^41[0-7]$/.test(three)) { ai = three; len = 13; }                // location numbers
+    else if (/^(10|21|22|30|37|9\d)$/.test(two)) { ai = two; len = -1; }       // variable length
+    else if (/^(24[0-3]|25[0-5]|40[0-3]|42[01])$/.test(three)) { ai = three; len = -1; }
+    else { out.push({ ai: '?', val: s.slice(i) }); break; }
+    i += ai.length;
+    let val;
+    if (len > 0) {
+      val = s.substr(i, len);
+      if (val.length < len) return null;
+      i += len;
+    } else {
+      const end = s.indexOf(GS, i);
+      val = end === -1 ? s.slice(i) : s.slice(i, end);
+      i = end === -1 ? s.length : end + 1;
+    }
+    out.push({ ai: ai, val: val });
+  }
+  return out.length ? out : null;
+}
+
+function gtinOk(g) {
+  if (!/^\d{14}$/.test(g)) return false;
+  let sum = 0;
+  for (let i = 0; i < 13; i++) sum += Number(g[i]) * (i % 2 === 0 ? 3 : 1);
+  return (10 - sum % 10) % 10 === Number(g[13]);
+}
+
+function showDate(v) {
+  return /^\d{6}$/.test(v) ? v.substr(2, 2) + '/' + v.substr(4, 2) + '/20' + v.substr(0, 2) : v;
+}
+
+function esc(t) {
+  return String(t).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+function showResult(text, seconds) {
+  const fields = parseGs1(text);
+  let html = '<div><b>Scanned in ' + seconds + ' s</b></div>';
+  if (fields) {
+    fields.forEach(f => {
+      let v = f.val;
+      if (/^(11|12|13|15|16|17)$/.test(f.ai)) v = showDate(v);
+      if (f.ai === '01' || f.ai === '02') v += gtinOk(f.val) ? ' (check digit OK)' : ' (CHECK DIGIT FAILED)';
+      const label = f.ai === '?' ? 'Not parsed' : (NAMES[f.ai] || 'AI ' + f.ai) + ' (' + f.ai + ')';
+      html += '<div>' + esc(label) + ': <b>' + esc(v) + '</b></div>';
+    });
+  } else {
+    html += '<div>Not a GS1 barcode. Value: <b>' + esc(text) + '</b></div>';
+  }
+  html += '<div class="raw">Raw: ' + esc(text.split(GS).join(' [GS] ')) + '</div>';
+  $('result').innerHTML = html;
+}
+
+// ---------- buttons ----------
+$('btnStart').addEventListener('click', () => { if (track) resume(); else startCamera(); });
+$('btnShot').addEventListener('click', () => {
+  if (!track) return;
+  scanning = false;
+  takePhoto();
+  $('result').innerHTML = '<div><b>Photo only</b> (no barcode read)</div>';
+});
+$('btnLight').addEventListener('click', async () => {
+  if (!track) return;
+  lightOn = !lightOn;
+  try { await track.applyConstraints({ advanced: [{ torch: lightOn }] }); }
+  catch (e) { $('info').textContent = 'This phone does not let the browser control the light.'; }
+});
+</script>
+</body>
+</html>
