@@ -261,6 +261,25 @@ async function readLabel(canvas, barcode) {
 function sameText(a, b) {
   return String(a).toUpperCase().replace(/[^A-Z0-9]/g, '') === String(b).toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
+// Reads the "(01) ... (10) ... (13) ..." line printed under a barcode into code/value pairs.
+function parsePrintedCodes(text) {
+  const out = [];
+  if (!text) return out;
+  const re = /\((\d{2,4})\)\s*([^()]*)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    let v = m[2].trim();
+    if (/^(00|01|02|11|12|13|15|16|17)$/.test(m[1])) v = v.replace(/\s+/g, '');
+    if (v) out.push({ ai: m[1], val: v });
+  }
+  return out;
+}
+
+// "2026-11-05" -> "11/05/2026", so it can be compared with readDate().
+function isoToUs(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || '');
+  return m ? m[2] + '/' + m[3] + '/' + m[1] : null;
+}
 
 function showExtract(x, barcode, seconds) {
   const row = (label, val, note) => val ? '<div>' + esc(label) + ': <b>' + esc(val) + '</b>' + (note || '') + '</div>' : '';
@@ -279,6 +298,21 @@ function showExtract(x, barcode, seconds) {
   html += row('Distributed by', x.distributor_name);
   html += row('Country of origin', x.country_of_origin);
   (x.other_codes || []).forEach(c => { html += row(c.label || 'Other code', c.value); });
+
+  // Dates in the numbers printed under the barcode, checked against the printed date lines.
+  const printedDate = { '13': x.pack_date, '15': x.best_by_date, '17': x.best_by_date };
+  parsePrintedCodes(x.barcode_text).forEach(c => {
+    if (!(c.ai in printedDate)) return;
+    const d = readDate(c.val);
+    let note = '';
+    if (d.note && /non-standard/.test(d.note)) {
+      note += ' <span class="bad">(wrong order: a standard scanner reads ' + esc(c.val) + ' as ' +
+        esc(c.val.substr(2, 2) + '/' + c.val.substr(4, 2) + '/20' + c.val.substr(0, 2)) + ')</span>';
+    }
+    const label = isoToUs(printedDate[c.ai]);
+    if (label) note += label === d.text ? ' (matches printed date)' : ' <span class="bad">(printed date says ' + esc(label) + ')</span>';
+    html += row((NAMES[c.ai] || 'Date') + ' in barcode (' + c.ai + ')', d.text, note);
+  });
   $('extract').innerHTML = html;
 }
 
