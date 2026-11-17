@@ -13,7 +13,7 @@
            border:3px solid #fff; border-radius:10px; box-sizing:border-box; }
   #guide.hit { border-color:#3ddc84; }
   #bar { display:flex; gap:8px; padding:10px; }
-  button { flex:1; font-size:17px; padding:14px 6px; border:0; border-radius:8px;
+  button { flex:1; font-size:15px; padding:14px 4px; border:0; border-radius:8px;
            background:#2d6cdf; color:#fff; }
   button.alt { background:#444; }
   #info, #result { padding:0 12px; font-size:15px; line-height:1.6; }
@@ -34,15 +34,16 @@
   <button id="btnStart">Start camera</button>
   <button id="btnShot" class="alt">Photo only</button>
   <button id="btnLight" class="alt">Light</button>
+  <button id="btnZoom" class="alt">Zoom</button>
 </div>
-<div id="info">Version 7. Tap Start camera, then aim at the case label.</div>
+<div id="info">Version 8. Tap Start camera, then aim at the case label.</div>
 <div id="result"></div>
 <div id="extract"></div>
 <img id="photo" alt="Captured label">
 
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
-const VERSION = 7;
+const VERSION = 8;
 const EXTRACT_URL = 'https://script.google.com/macros/s/AKfycbzXu4w5-gX9DVAITBlr7pb2A4m7SajbiZhj3cRAu3zxh8rVHV9gqAW3DS58DU0vVD8x8w/exec';   // the label reader's Web app URL from Apps Script
 const GS = '\u001d';            // separator character inside GS1 barcodes
 const WAIT_FOR_GS1_MS = 1500;   // keep looking this long for a GS1 code before accepting a UPC or other code
@@ -53,6 +54,7 @@ const frame = document.createElement('canvas');
 let track = null, nativeScanner = null, zxingReader = null;
 let scanning = false, lightOn = false, startedAt = 0;
 let fallback = null;            // best non-GS1 code seen so far: { text, at }
+let tickCount = 0, zoomed = false;
 
 // ---------- camera ----------
 async function startCamera() {
@@ -71,6 +73,12 @@ async function startCamera() {
     await video.play();
     track = stream.getVideoTracks()[0];
     try { localStorage.setItem('cameraId', track.getSettings().deviceId); } catch (e) {}
+    try {
+      const c = track.getCapabilities ? track.getCapabilities() : {};
+      if (c.focusMode && c.focusMode.indexOf('continuous') !== -1) {
+        await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+      }
+    } catch (e) { /* camera keeps its own focus setting */ }
   } catch (e) {
     $('info').textContent = 'Camera error: ' + e.message;
     return;
@@ -79,12 +87,12 @@ async function startCamera() {
   const caps = track.getCapabilities ? track.getCapabilities() : {};
   $('info').textContent = 'v' + VERSION + ' | Camera ' + video.videoWidth + ' x ' + video.videoHeight +
     ' | scanner: ' + (nativeScanner ? 'built-in' : zxingReader ? 'ZXing' : 'none') +
-    ' | light: ' + (caps.torch ? 'yes' : 'no');
+    ' | light: ' + (caps.torch ? 'yes' : 'no') + ' | zoom: ' + (caps.zoom ? 'yes' : 'no');
   $('btnStart').textContent = 'Scan again';
   resume();
 }
 
-const SIZE = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+const SIZE = { width: { ideal: 3840 }, height: { ideal: 2160 } };   // ask for the sharpest picture the camera offers
 
 function openCamera(constraints) {
   return navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({}, SIZE, constraints) });
@@ -147,7 +155,8 @@ function resume() {
 }
 
 // ---------- scan loop ----------
-// Reads the whole frame, so labels turned sideways still scan.
+// Alternates between the whole frame (labels turned sideways) and the area inside
+// the white box at full detail (small or thin barcodes).
 // A GS1 code wins right away. A UPC or other code is only accepted
 // if no GS1 code turns up within WAIT_FOR_GS1_MS.
 async function tick() {
@@ -155,8 +164,13 @@ async function tick() {
   const texts = [];
   const vw = video.videoWidth, vh = video.videoHeight;
   if (vw) {
-    frame.width = vw; frame.height = vh;
-    frame.getContext('2d', { willReadFrequently: true }).drawImage(video, 0, 0, vw, vh);
+    let sx = 0, sy = 0, sw = vw, sh = vh;
+    if (tickCount++ % 2 === 1) {
+      sx = Math.round(vw * 0.08); sy = Math.round(vh * 0.25);
+      sw = Math.round(vw * 0.84); sh = Math.round(vh * 0.5);
+    }
+    frame.width = sw; frame.height = sh;
+    frame.getContext('2d', { willReadFrequently: true }).drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
     try {
       if (nativeScanner) {
         (await nativeScanner.detect(frame)).forEach(b => texts.push(b.rawValue));
@@ -473,6 +487,17 @@ $('btnLight').addEventListener('click', async () => {
   lightOn = !lightOn;
   try { await track.applyConstraints({ advanced: [{ torch: lightOn }] }); }
   catch (e) { $('info').textContent = 'This phone does not let the browser control the light.'; }
+});
+$('btnZoom').addEventListener('click', async () => {
+  if (!track) return;
+  const c = track.getCapabilities ? track.getCapabilities() : {};
+  if (!c.zoom) { $('info').textContent = 'This camera does not let the browser zoom.'; return; }
+  zoomed = !zoomed;
+  const level = zoomed ? Math.min(c.zoom.max, Math.max(c.zoom.min, 2)) : c.zoom.min;
+  try {
+    await track.applyConstraints({ advanced: [{ zoom: level }] });
+    $('btnZoom').textContent = zoomed ? 'Zoom 2x' : 'Zoom';
+  } catch (e) { $('info').textContent = 'Zoom did not work: ' + e.message; }
 });
 </script>
 </body>
