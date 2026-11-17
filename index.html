@@ -7,15 +7,6 @@
 <style>
   body { margin:0; font-family:system-ui,sans-serif; background:#111; color:#eee; }
   #stage { text-align:center; background:#000; }
-  #wrap { position:relative; displ<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Capture Test</title>
-<style>
-  body { margin:0; font-family:system-ui,sans-serif; background:#111; color:#eee; }
-  #stage { text-align:center; background:#000; }
   #wrap { position:relative; display:inline-block; line-height:0; }
   video { max-width:100%; max-height:60vh; display:block; }
   #guide { position:absolute; left:8%; top:25%; width:84%; height:50%;
@@ -56,46 +47,6 @@ const EXTRACT_URL = 'https://script.google.com/macros/s/AKfycbzXu4w5-gX9DVAITBlr
 const GS = '\u001d';            // separator character inside GS1 barcodes
 const WAIT_FOR_GS1_MS = 1500;   // keep looking this long for a GS1 code before accepting a UPC or other code
 
-const $ = id => document.getElementById(id);ay:inline-block; line-height:0; }
-  video { max-width:100%; max-height:60vh; display:block; }
-  #guide { position:absolute; left:8%; top:25%; width:84%; height:50%;
-           border:3px solid #fff; border-radius:10px; box-sizing:border-box; }
-  #guide.hit { border-color:#3ddc84; }
-  #bar { display:flex; gap:8px; padding:10px; }
-  button { flex:1; font-size:17px; padding:14px 6px; border:0; border-radius:8px;
-           background:#2d6cdf; color:#fff; }
-  button.alt { background:#444; }
-  #info, #result { padding:0 12px; font-size:15px; line-height:1.6; }
-  #result b { color:#3ddc84; }
-  .warn { color:#ffb340; }
-  .raw { font-family:monospace; word-break:break-all; color:#bbb; }
-  #photo { width:100%; margin-top:10px; display:none; }
-  #extract { padding:6px 12px 0; font-size:15px; line-height:1.6; border-top:1px solid #333; margin-top:8px; }
-  #extract b { color:#7cc4ff; }
-  .bad { color:#ff6b6b; font-weight:600; }
-</style>
-</head>
-<body>
-<div id="stage"><div id="wrap">
-  <video id="video" playsinline muted></video><div id="guide"></div>
-</div></div>
-<div id="bar">
-  <button id="btnStart">Start camera</button>
-  <button id="btnShot" class="alt">Photo only</button>
-  <button id="btnLight" class="alt">Light</button>
-</div>
-<div id="info">Version 6. Tap Start camera, then aim at the case label.</div>
-<div id="result"></div>
-<div id="extract"></div>
-<img id="photo" alt="Captured label">
-
-<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
-<script>
-const VERSION = 6;
-const EXTRACT_URL = 'https://script.google.com/macros/s/AKfycbzXu4w5-gX9DVAITBlr7pb2A4m7SajbiZhj3cRAu3zxh8rVHV9gqAW3DS58DU0vVD8x8w/exec';   // the label reader's Web app URL from Apps Script
-const GS = '\u001d';            // separator character inside GS1 barcodes
-const WAIT_FOR_GS1_MS = 1500;   // keep looking this long for a GS1 code before accepting a UPC or other code
-
 const $ = id => document.getElementById(id);
 const video = $('video');
 const frame = document.createElement('canvas');
@@ -107,18 +58,26 @@ let fallback = null;            // best non-GS1 code seen so far: { text, at }
 async function startCamera() {
   try {
     $('info').textContent = 'Starting camera...';
-    let stream = await openCamera({ facingMode: { ideal: 'environment' } });
-    if (!hasTorch(stream.getVideoTracks()[0])) stream = await findTorchCamera(stream);
+    let stream = null, saved = null;
+    try { saved = localStorage.getItem('cameraId'); } catch (e) {}
+    if (saved) {
+      try { stream = await openCamera({ deviceId: { exact: saved } }); } catch (e) { stream = null; }
+    }
+    if (!stream) {
+      stream = await openCamera({ facingMode: { ideal: 'environment' } });
+      if (!hasTorch(stream.getVideoTracks()[0])) stream = await findTorchCamera(stream);
+    }
     video.srcObject = stream;
     await video.play();
     track = stream.getVideoTracks()[0];
+    try { localStorage.setItem('cameraId', track.getSettings().deviceId); } catch (e) {}
   } catch (e) {
     $('info').textContent = 'Camera error: ' + e.message;
     return;
   }
   await setUpScanner();
   const caps = track.getCapabilities ? track.getCapabilities() : {};
-  $('info').textContent = 'v' + ION + ' | Camera ' + video.videoWidth + ' x ' + video.videoHeight +
+  $('info').textContent = 'v' + VERSION + ' | Camera ' + video.videoWidth + ' x ' + video.videoHeight +
     ' | scanner: ' + (nativeScanner ? 'built-in' : zxingReader ? 'ZXing' : 'none') +
     ' | light: ' + (caps.torch ? 'yes' : 'no');
   $('btnStart').textContent = 'Scan again';
@@ -288,23 +247,41 @@ async function readLabel(canvas, barcode) {
   if (EXTRACT_URL.indexOf('http') !== 0) { $('extract').innerHTML = '<div class="warn">Label reader not set up yet.</div>'; return; }
   const code = accessCode(false);
   if (!code) { $('extract').innerHTML = '<div class="warn">No access code, so the label was not read.</div>'; return; }
-  $('extract').innerHTML = '<div>Reading label...</div>';
+  $('extract').innerHTML = '<div>Reading label... <span id="readSecs">0</span> s</div>';
   const started = Date.now();
-  let data;
+  const ticker = setInterval(() => {
+    const el = document.getElementById('readSecs');
+    if (el) el.textContent = Math.round((Date.now() - started) / 1000);
+  }, 1000);
+  const controller = ('AbortController' in window) ? new AbortController() : null;
+  const timeout = setTimeout(() => { if (controller) controller.abort(); }, 45000);
   try {
     // Sent as plain text so the browser does not need Apps Script to answer a pre-check first.
-    const res = await fetch(EXTRACT_URL, { method: 'POST', body: JSON.stringify({ code: code, image: smallJpeg(canvas) }) });
-    data = await res.json();
+    const res = await fetch(EXTRACT_URL, {
+      method: 'POST',
+      body: JSON.stringify({ code: code, image: smallJpeg(canvas) }),
+      signal: controller ? controller.signal : undefined
+    });
+    const raw = await res.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch (e) {
+      throw new Error('Unexpected reply from the label reader: ' +
+        raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+    }
+    if (data.error) {
+      if (/access code/i.test(data.error)) accessCode(true);
+      $('extract').innerHTML = '<div class="bad">Label reader: ' + esc(data.error) + '</div>';
+      return;
+    }
+    showExtract(data.fields || {}, barcode, ((Date.now() - started) / 1000).toFixed(1));
   } catch (e) {
-    $('extract').innerHTML = '<div class="warn">Could not reach the label reader (no signal?). ' + esc(e.message) + '</div>';
-    return;
+    const msg = e.name === 'AbortError' ? 'No answer after 45 seconds.' : e.message;
+    $('extract').innerHTML = '<div class="bad">Label reader problem: ' + esc(msg) + '</div>';
+  } finally {
+    clearInterval(ticker);
+    clearTimeout(timeout);
   }
-  if (data.error) {
-    if (/access code/i.test(data.error)) accessCode(true);
-    $('extract').innerHTML = '<div class="bad">Label reader: ' + esc(data.error) + '</div>';
-    return;
-  }
-  showExtract(data.fields || {}, barcode, ((Date.now() - started) / 1000).toFixed(1));
 }
 
 function sameText(a, b) {
@@ -341,9 +318,10 @@ function showExtract(x, barcode, seconds) {
   html += row('Product', x.product);
   html += row('Lot' + (x.lot_label ? ' [' + x.lot_label + ']' : ''), x.lot, check(x.lot, barcode && barcode.lot));
   if (!x.lot) html += '<div class="warn">No lot found on the label.</div>';
+  else if (x.lot_basis === 'unlabeled') html += '<div class="warn">This lot is not labeled on the box, so it is a best guess. Check it.</div>';
   html += row('GTIN', gtin, check(gtin, barcode && barcode.gtin && ('00000000000000' + barcode.gtin).slice(-14)));
   html += row('Pack date', x.pack_date) + row('Harvest date', x.harvest_date) + row('Best by', x.best_by_date);
-  html += row(x.packer_role || 'Packer', [x.packer_name, x.packer_address].filter(Boolean).join(', '));
+  html += row(String(x.packer_role || 'Packer').replace(/[:\s]+$/, ''), [x.packer_name, x.packer_address].filter(Boolean).join(', '));
   html += row('Distributed by', x.distributor_name);
   html += row('Country of origin', x.country_of_origin);
   (x.other_codes || []).forEach(c => { html += row(c.label || 'Other code', c.value); });
