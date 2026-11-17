@@ -21,6 +21,9 @@
   .warn { color:#ffb340; }
   .raw { font-family:monospace; word-break:break-all; color:#bbb; }
   #photo { width:100%; margin-top:10px; display:none; }
+  #extract { padding:6px 12px 0; font-size:15px; line-height:1.6; border-top:1px solid #333; margin-top:8px; }
+  #extract b { color:#7cc4ff; }
+  .bad { color:#ff6b6b; font-weight:600; }
 </style>
 </head>
 <body>
@@ -32,13 +35,15 @@
   <button id="btnShot" class="alt">Photo only</button>
   <button id="btnLight" class="alt">Light</button>
 </div>
-<div id="info">Version 3. Tap Start camera, then aim at the case label.</div>
+<div id="info">Version 5. Tap Start camera, then aim at the case label.</div>
 <div id="result"></div>
+<div id="extract"></div>
 <img id="photo" alt="Captured label">
 
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
-const VERSION = 3;
+const VERSION = 5;
+const EXTRACT_URL = 'https://script.google.com/macros/s/AKfycbzXu4w5-gX9DVAITBlr7pb2A4m7SajbiZhj3cRAu3zxh8rVHV9gqAW3DS58DU0vVD8x8w/exec';   // the label reader's Web app URL from Apps Script
 const GS = '\u001d';            // separator character inside GS1 barcodes
 const WAIT_FOR_GS1_MS = 1500;   // keep looking this long for a GS1 code before accepting a UPC or other code
 
@@ -52,10 +57,9 @@ let fallback = null;            // best non-GS1 code seen so far: { text, at }
 // ---------- camera ----------
 async function startCamera() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-    });
+    $('info').textContent = 'Starting camera...';
+    let stream = await openCamera({ facingMode: { ideal: 'environment' } });
+    if (!hasTorch(stream.getVideoTracks()[0])) stream = await findTorchCamera(stream);
     video.srcObject = stream;
     await video.play();
     track = stream.getVideoTracks()[0];
@@ -70,6 +74,35 @@ async function startCamera() {
     ' | light: ' + (caps.torch ? 'yes' : 'no');
   $('btnStart').textContent = 'Scan again';
   resume();
+}
+
+const SIZE = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+
+function openCamera(constraints) {
+  return navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({}, SIZE, constraints) });
+}
+
+function hasTorch(t) {
+  return !!(t && t.getCapabilities && t.getCapabilities().torch);
+}
+
+// Phones with several back lenses often hand the browser one without the flash.
+// Try the other back cameras and keep the first one that can turn the light on.
+async function findTorchCamera(stream) {
+  const first = stream.getVideoTracks()[0];
+  const firstId = first.getSettings().deviceId;
+  const cams = (await navigator.mediaDevices.enumerateDevices())
+    .filter(d => d.kind === 'videoinput' && d.deviceId !== firstId && !/front|user/i.test(d.label));
+  if (!cams.length) return stream;
+  first.stop();
+  for (const cam of cams) {
+    try {
+      const s = await openCamera({ deviceId: { exact: cam.deviceId } });
+      if (hasTorch(s.getVideoTracks()[0])) return s;
+      s.getTracks().forEach(t => t.stop());
+    } catch (e) { /* that camera would not open */ }
+  }
+  return openCamera({ deviceId: { exact: firstId } });   // none had a light; go back to the first one
 }
 
 async function setUpScanner() {
@@ -100,6 +133,7 @@ function resume() {
   startedAt = Date.now();
   $('guide').classList.remove('hit');
   $('result').innerHTML = '';
+  $('extract').innerHTML = '';
   $('photo').style.display = 'none';
   tick();
 }
@@ -141,7 +175,7 @@ function pickBest(texts) {
   let best = null;
   texts.forEach(t => {
     const f = parseGs1(t);
-    let score = 0;
+    let score = plainGtin(t) ? 50 : 0;
     if (f) {
       score = 100 + f.length;
       if (f.some(x => x.ai === '10')) score += 20;
@@ -157,17 +191,95 @@ function onDecode(text, warning) {
   const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
   $('guide').classList.add('hit');
   if (navigator.vibrate) navigator.vibrate(80);
-  takePhoto();
+  const shot = takePhoto();
   showResult(text, seconds, warning);
+  readLabel(shot, barcodeSummary(text));
 }
 
 function takePhoto() {
-  if (!video.videoWidth) return;
+  if (!video.videoWidth) return null;
   const full = document.createElement('canvas');
   full.width = video.videoWidth; full.height = video.videoHeight;
   full.getContext('2d').drawImage(video, 0, 0);
   $('photo').src = full.toDataURL('image/jpeg', 0.9);
   $('photo').style.display = 'block';
+  return full;
+}
+
+// ---------- label reading (photo -> Apps Script -> Gemini) ----------
+function barcodeSummary(text) {
+  const f = parseGs1(text);
+  if (f) {
+    const get = ai => (f.find(x => x.ai === ai) || {}).val || null;
+    return { gtin: get('01'), lot: get('10') };
+  }
+  return { gtin: plainGtin(text), lot: null };
+}
+
+function accessCode(reset) {
+  let code = null;
+  try { if (reset) localStorage.removeItem('labelReaderCode'); code = localStorage.getItem('labelReaderCode'); } catch (e) {}
+  if (!code) {
+    code = window.prompt('Enter the label reader access code');
+    if (code) { try { localStorage.setItem('labelReaderCode', code); } catch (e) {} }
+  }
+  return code;
+}
+
+function smallJpeg(canvas) {
+  const scale = Math.min(1, 1600 / Math.max(canvas.width, canvas.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(canvas.width * scale); c.height = Math.round(canvas.height * scale);
+  c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+async function readLabel(canvas, barcode) {
+  if (!canvas) return;
+  if (EXTRACT_URL.indexOf('http') !== 0) { $('extract').innerHTML = '<div class="warn">Label reader not set up yet.</div>'; return; }
+  const code = accessCode(false);
+  if (!code) { $('extract').innerHTML = '<div class="warn">No access code, so the label was not read.</div>'; return; }
+  $('extract').innerHTML = '<div>Reading label...</div>';
+  const started = Date.now();
+  let data;
+  try {
+    // Sent as plain text so the browser does not need Apps Script to answer a pre-check first.
+    const res = await fetch(EXTRACT_URL, { method: 'POST', body: JSON.stringify({ code: code, image: smallJpeg(canvas) }) });
+    data = await res.json();
+  } catch (e) {
+    $('extract').innerHTML = '<div class="warn">Could not reach the label reader (no signal?). ' + esc(e.message) + '</div>';
+    return;
+  }
+  if (data.error) {
+    if (/access code/i.test(data.error)) accessCode(true);
+    $('extract').innerHTML = '<div class="bad">Label reader: ' + esc(data.error) + '</div>';
+    return;
+  }
+  showExtract(data.fields || {}, barcode, ((Date.now() - started) / 1000).toFixed(1));
+}
+
+function sameText(a, b) {
+  return String(a).toUpperCase().replace(/[^A-Z0-9]/g, '') === String(b).toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function showExtract(x, barcode, seconds) {
+  const row = (label, val, note) => val ? '<div>' + esc(label) + ': <b>' + esc(val) + '</b>' + (note || '') + '</div>' : '';
+  const check = (printed, scanned) => {
+    if (!printed || !scanned) return '';
+    return sameText(printed, scanned) ? ' <span>(matches barcode)</span>' : ' <span class="bad">(DIFFERENT from barcode: ' + esc(scanned) + ')</span>';
+  };
+  const gtin = x.gtin ? ('00000000000000' + String(x.gtin).replace(/\D/g, '')).slice(-14) : null;
+  let html = '<div><b>Read from photo in ' + seconds + ' s</b> (readability: ' + esc(x.readability || '?') + ')</div>';
+  html += row('Product', x.product);
+  html += row('Lot' + (x.lot_label ? ' [' + x.lot_label + ']' : ''), x.lot, check(x.lot, barcode && barcode.lot));
+  if (!x.lot) html += '<div class="warn">No lot found on the label.</div>';
+  html += row('GTIN', gtin, check(gtin, barcode && barcode.gtin && ('00000000000000' + barcode.gtin).slice(-14)));
+  html += row('Pack date', x.pack_date) + row('Harvest date', x.harvest_date) + row('Best by', x.best_by_date);
+  html += row(x.packer_role || 'Packer', [x.packer_name, x.packer_address].filter(Boolean).join(', '));
+  html += row('Distributed by', x.distributor_name);
+  html += row('Country of origin', x.country_of_origin);
+  (x.other_codes || []).forEach(c => { html += row(c.label || 'Other code', c.value); });
+  $('extract').innerHTML = html;
 }
 
 // ---------- GS1 parsing ----------
@@ -206,6 +318,13 @@ function parseGs1(raw) {
     out.push({ ai: ai, val: val });
   }
   return out.length ? out : null;
+}
+
+// A UPC, EAN or ITF-14 barcode holds only a GTIN: 8, 12, 13 or 14 digits with a valid check digit.
+function plainGtin(t) {
+  if (!/^(\d{8}|\d{12,14})$/.test(t)) return null;
+  const g = ('00000000000000' + t).slice(-14);
+  return gtinOk(g) ? g : null;
 }
 
 function gtinOk(g) {
@@ -265,7 +384,13 @@ function showResult(text, seconds, warning) {
       const label = f.ai === '?' ? 'Not parsed' : name + ' (' + f.ai + ')';
       html += '<div>' + esc(label) + ': <b>' + esc(v) + '</b></div>';
     });
-    if (!fields.some(f => f.ai === '10')) html += '<div class="warn">No lot in this barcode.</div>';
+    const pallet = fields.length === 1 && fields[0].ai === '00';
+    if (pallet) html += '<div>This is a pallet label.</div>';
+    else if (!fields.some(f => f.ai === '10')) html += '<div class="warn">No lot in this barcode.</div>';
+  } else if (plainGtin(text)) {
+    const g = plainGtin(text);
+    html += '<div>GTIN (UPC/EAN/ITF-14): <b>' + esc(g) + '</b></div>';
+    html += '<div class="warn">This barcode type holds only a GTIN, never a lot or date.</div>';
   } else {
     html += '<div>Not a GS1 barcode. Value: <b>' + esc(text) + '</b></div>';
   }
@@ -278,8 +403,9 @@ $('btnStart').addEventListener('click', () => { if (track) resume(); else startC
 $('btnShot').addEventListener('click', () => {
   if (!track) return;
   scanning = false;
-  takePhoto();
+  const shot = takePhoto();
   $('result').innerHTML = '<div><b>Photo only</b> (no barcode read)</div>';
+  readLabel(shot, null);
 });
 $('btnLight').addEventListener('click', async () => {
   if (!track) return;
