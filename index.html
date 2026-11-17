@@ -35,14 +35,14 @@
   <button id="btnShot" class="alt">Photo only</button>
   <button id="btnLight" class="alt">Light</button>
 </div>
-<div id="info">Version 5. Tap Start camera, then aim at the case label.</div>
+<div id="info">Version 6. Tap Start camera, then aim at the case label.</div>
 <div id="result"></div>
 <div id="extract"></div>
 <img id="photo" alt="Captured label">
 
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
-const VERSION = 5;
+const VERSION = 6;
 const EXTRACT_URL = 'https://script.google.com/macros/s/AKfycbzXu4w5-gX9DVAITBlr7pb2A4m7SajbiZhj3cRAu3zxh8rVHV9gqAW3DS58DU0vVD8x8w/exec';   // the label reader's Web app URL from Apps Script
 const GS = '\u001d';            // separator character inside GS1 barcodes
 const WAIT_FOR_GS1_MS = 1500;   // keep looking this long for a GS1 code before accepting a UPC or other code
@@ -69,7 +69,7 @@ async function startCamera() {
   }
   await setUpScanner();
   const caps = track.getCapabilities ? track.getCapabilities() : {};
-  $('info').textContent = 'v' + VERSION + ' | Camera ' + video.videoWidth + ' x ' + video.videoHeight +
+  $('info').textContent = 'v' + ION + ' | Camera ' + video.videoWidth + ' x ' + video.videoHeight +
     ' | scanner: ' + (nativeScanner ? 'built-in' : zxingReader ? 'ZXing' : 'none') +
     ' | light: ' + (caps.torch ? 'yes' : 'no');
   $('btnStart').textContent = 'Scan again';
