@@ -7,7 +7,56 @@
 <style>
   body { margin:0; font-family:system-ui,sans-serif; background:#111; color:#eee; }
   #stage { text-align:center; background:#000; }
+  #wrap { position:relative; displ<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capture Test</title>
+<style>
+  body { margin:0; font-family:system-ui,sans-serif; background:#111; color:#eee; }
+  #stage { text-align:center; background:#000; }
   #wrap { position:relative; display:inline-block; line-height:0; }
+  video { max-width:100%; max-height:60vh; display:block; }
+  #guide { position:absolute; left:8%; top:25%; width:84%; height:50%;
+           border:3px solid #fff; border-radius:10px; box-sizing:border-box; }
+  #guide.hit { border-color:#3ddc84; }
+  #bar { display:flex; gap:8px; padding:10px; }
+  button { flex:1; font-size:17px; padding:14px 6px; border:0; border-radius:8px;
+           background:#2d6cdf; color:#fff; }
+  button.alt { background:#444; }
+  #info, #result { padding:0 12px; font-size:15px; line-height:1.6; }
+  #result b { color:#3ddc84; }
+  .warn { color:#ffb340; }
+  .raw { font-family:monospace; word-break:break-all; color:#bbb; }
+  #photo { width:100%; margin-top:10px; display:none; }
+  #extract { padding:6px 12px 0; font-size:15px; line-height:1.6; border-top:1px solid #333; margin-top:8px; }
+  #extract b { color:#7cc4ff; }
+  .bad { color:#ff6b6b; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="wrap">
+  <video id="video" playsinline muted></video><div id="guide"></div>
+</div></div>
+<div id="bar">
+  <button id="btnStart">Start camera</button>
+  <button id="btnShot" class="alt">Photo only</button>
+  <button id="btnLight" class="alt">Light</button>
+</div>
+<div id="info">Version 7. Tap Start camera, then aim at the case label.</div>
+<div id="result"></div>
+<div id="extract"></div>
+<img id="photo" alt="Captured label">
+
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+const VERSION = 7;
+const EXTRACT_URL = 'https://script.google.com/macros/s/AKfycbzXu4w5-gX9DVAITBlr7pb2A4m7SajbiZhj3cRAu3zxh8rVHV9gqAW3DS58DU0vVD8x8w/exec';   // the label reader's Web app URL from Apps Script
+const GS = '\u001d';            // separator character inside GS1 barcodes
+const WAIT_FOR_GS1_MS = 1500;   // keep looking this long for a GS1 code before accepting a UPC or other code
+
+const $ = id => document.getElementById(id);ay:inline-block; line-height:0; }
   video { max-width:100%; max-height:60vh; display:block; }
   #guide { position:absolute; left:8%; top:25%; width:84%; height:50%;
            border:3px solid #fff; border-radius:10px; box-sizing:border-box; }
